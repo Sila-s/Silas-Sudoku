@@ -282,7 +282,16 @@ footer { flex: none; display: flex; flex-direction: column; gap: 10px; padding-t
 /* ---------- Sheets ---------- */
 #sheet { position: fixed; inset: 0; z-index: 20; }
 #sheet[hidden] { display: none; }
-.backdrop { position: absolute; inset: 0; background: var(--backdrop); }
+.backdrop {
+  position: absolute; inset: 0;
+  /* Clear under the status bar (which iOS paints itself and we can't dim),
+     building to full dimming further down, so there's no hard edge at the top. */
+  background: linear-gradient(to bottom,
+    transparent 0,
+    transparent env(safe-area-inset-top),
+    var(--backdrop) calc(env(safe-area-inset-top) + 160px),
+    var(--backdrop) 100%);
+}
 .panel {
   position: absolute; left: 0; right: 0; bottom: 0;
   max-width: 560px; margin: 0 auto;

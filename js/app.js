@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.0'; // keep in sync with sw.js
+  const VERSION = '1.4.1'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
