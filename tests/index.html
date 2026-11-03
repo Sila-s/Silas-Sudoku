@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine tests</title>
+<style>
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 16px; color: #1f2329; background: #f6f6f4; }
+  h1 { font-size: 18px; }
+  pre { white-space: pre-wrap; background: #fff; border: 1px solid #d9dce1; border-radius: 10px; padding: 12px; }
+  .pass { color: #1b7a3a; font-weight: 600; } .fail { color: #d23c3c; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Puzzle engine tests</h1>
+<p>Generates 20 puzzles per difficulty on this device, then checks each has exactly one solution and the intended grade.</p>
+<pre id="out">Running&hellip;</pre>
+<script src="../js/engine.js"></script>
+<script>
+(async () => {
+  const E = SudokuEngine, out = document.getElementById('out');
+  const N = 20; let fails = 0; const lines = [];
+  const log = (s) => { lines.push(s); out.innerHTML = lines.join('\n'); };
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  out.textContent = '';
+  for (const diff of E.DIFFICULTIES) {
+    const times = [];
+    for (let k = 0; k < N; k++) {
+      await tick();
+      const t0 = performance.now();
+      const p = E.generate(diff);
+      times.push(performance.now() - t0);
+      const sols = E.countSolutions(p.puzzle, 2);
+      const lg = E.solveLogically(p.puzzle, 4);
+      if (sols !== 1) { fails++; log(`<span class="fail">FAIL</span> ${diff} #${k}: ${sols} solutions`); }
+      if (!lg.solved || lg.level !== E.LEVEL[diff]) { fails++; log(`<span class="fail">FAIL</span> ${diff} #${k}: grade ${lg.level}`); }
+    }
+    const avg = times.reduce((a, b) => a + b, 0) / N;
+    log(`${diff.padEnd(7)} ${N} puzzles, avg ${avg.toFixed(0)} ms, max ${Math.max(...times).toFixed(0)} ms`);
+  }
+  log(fails ? `<span class="fail">${fails} failure(s)</span>` : '<span class="pass">All tests passed</span>');
+})();
+</script>
+</body>
+</html>
