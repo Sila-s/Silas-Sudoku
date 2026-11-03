@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.1'; // keep in sync with sw.js
+  const VERSION = '1.4.0'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -33,7 +33,6 @@
   let hint = null;
   let runningSince = null;
   let warnedFull = false;
-  let restartArmed = false;
 
   // ---------- Clock ----------
   const elapsed = () => (game ? game.elapsed + (runningSince ? Date.now() - runningSince : 0) : 0);
@@ -108,6 +107,7 @@
     loading = false; warnedFull = false;
     saveGame();
     render();
+    introBoard();
     startClock();
     refillPool();
   }
@@ -118,6 +118,7 @@
     hint = null; selected = -1; paused = false; warnedFull = false; notesMode = false; noteDigit = 0;
     saveGame();
     closeSheet();
+    introBoard();
   }
   const canPlay = () => game && !game.completed && !game.failed && !paused && !loading;
 
@@ -258,6 +259,23 @@
     }
     for (const [c, t] of pops) pop(c, t, number && game.values[c] === d);
     return number ? 'number' : 'unit';
+  }
+  // New puzzle: a ripple spreads from the centre and each starting digit
+  // springs into place as the wave reaches it.
+  function introBoard() {
+    if (!settings.animations || !game) return;
+    const all = [...Array(81).keys()];
+    const wave = ripple(all, 40, { delay: 90 });
+    const pops = new Map();
+    popAlongWave(all, wave, RIPPLE_MS, false, pops);
+    for (const [c, t] of pops) {
+      if (!game.values[c]) continue;
+      const v = valSpans[c];
+      v.classList.remove('pop', 'pop-big', 'enter');
+      void v.offsetWidth;
+      v.style.animationDelay = 90 + t * 0.85 + 'ms';
+      v.classList.add('enter');
+    }
   }
   function celebrateSolved(i) {
     const all = [...Array(81).keys()];
@@ -509,7 +527,7 @@
       el.setAttribute('role', 'gridcell');
       const v = document.createElement('span');
       v.className = 'v';
-      v.addEventListener('animationend', () => v.classList.remove('pop', 'pop-big'));
+      v.addEventListener('animationend', () => v.classList.remove('pop', 'pop-big', 'enter'));
       const notes = document.createElement('div');
       notes.className = 'notes';
       const spans = [];
@@ -693,12 +711,16 @@
     opts = opts || {};
     stopClock();
     sheetView = view;
-    restartArmed = false;
     let html = '<div class="grabber"></div>';
     if (view === 'menu') {
       html += '<h3>New game</h3>' + diffGrid();
       if (game && !game.completed) {
-        html += '<h3>This puzzle</h3><div class="list"><button class="row" data-act="restart"><span>Restart puzzle</span><span class="val" id="restart-hint"></span></button></div>';
+        const label = '<span>Restart puzzle</span><span class="val hold-hint">Hold</span>';
+        html += '<h3>This puzzle</h3><div class="list"><button class="row hold-row" id="hold-restart">' + label
+          + '<span class="liquid" aria-hidden="true">'
+          + '<span class="waves"><svg viewBox="0 0 240 12" preserveAspectRatio="none"><path class="w1" d="M0 6 Q15 0 30 6 T60 6 T90 6 T120 6 T150 6 T180 6 T210 6 T240 6 V12 H0 Z"/><path class="w2" d="M0 7 Q15 12 30 7 T60 7 T90 7 T120 7 T150 7 T180 7 T210 7 T240 7 V12 H0 Z"/></svg></span>'
+          + '<span class="water"><span class="row inv">' + label + '</span></span>'
+          + '</span></button></div>';
       }
       html += '<h3>More</h3><div class="list">'
         + '<button class="row" data-act="stats"><span>Statistics</span>' + chev + '</button>'
@@ -739,16 +761,66 @@
     }
     const keepScroll = opts.keepScroll ? panel.scrollTop : 0;
     panel.innerHTML = html;
+    clearTimeout(closeTimer);
+    sheet.classList.remove('closing');
     sheet.hidden = false;
     panel.scrollTop = keepScroll;
     $('#toast').classList.remove('show');
+    const hold = $('#hold-restart');
+    if (hold) holdToConfirm(hold, 1300, restart);
   }
+  let closeTimer = 0;
   function closeSheet(force) {
     if (!force && !game) return; // first launch: must choose a difficulty
-    sheet.hidden = true;
+    if (sheet.hidden) return;
     sheetView = null;
+    const finish = () => { sheet.hidden = true; sheet.classList.remove('closing'); render(); startClock(); };
+    if (settings.animations) {
+      sheet.classList.add('closing'); // slides down, then hides
+      clearTimeout(closeTimer);
+      closeTimer = setTimeout(finish, 190);
+    } else finish();
     render();
-    startClock();
+  }
+
+  // Press and hold: the button fills with water in the accent colour; let go
+  // early and it drains away. Full = confirmed.
+  function holdToConfirm(btn, ms, onDone) {
+    const liquid = btn.querySelector('.liquid'), hintEl = btn.querySelector('.hold-hint');
+    let level = 0, holding = false, raf = 0, last = 0, done = false;
+    const show = () => {
+      liquid.style.setProperty('--level', level.toFixed(4));
+      btn.classList.toggle('filling', level > 0);
+      const t = done ? 'Restarting' : holding ? 'Keep holding' : 'Hold';
+      if (hintEl.textContent !== t) btn.querySelectorAll('.hold-hint').forEach((h) => { h.textContent = t; });
+    };
+    const step = (now) => {
+      const dt = Math.min(64, now - last);
+      last = now;
+      level = Math.max(0, Math.min(1, level + (holding ? dt / ms : -dt / 320)));
+      show();
+      if (holding && level >= 1) {
+        done = true; holding = false;
+        btn.classList.add('full');
+        show();
+        Sound.play('unit');
+        setTimeout(onDone, 220);
+        raf = 0;
+        return;
+      }
+      raf = holding || level > 0 ? requestAnimationFrame(step) : 0;
+    };
+    const kick = () => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(step); } };
+    btn.addEventListener('pointerdown', (e) => {
+      if (done || e.button !== 0) return;
+      e.preventDefault();
+      holding = true;
+      try { btn.setPointerCapture(e.pointerId); } catch (err) { /* not supported */ }
+      kick();
+    });
+    const release = () => { if (!done) { holding = false; show(); kick(); } };
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((ev) => btn.addEventListener(ev, release));
+    btn.addEventListener('contextmenu', (e) => e.preventDefault());
   }
   panel.addEventListener('click', (e) => {
     const t = e.target.closest('button');
@@ -775,10 +847,7 @@
       saveSettings();
       openSheet('customise', { keepScroll: true }); render();
     }
-    else if (act === 'restart') {
-      if (restartArmed) restart();
-      else { restartArmed = true; $('#restart-hint').textContent = 'Tap again to confirm'; }
-    } else if (act === 'reset-stats') {
+    else if (act === 'reset-stats') {
       if (t.dataset.armed) { stats = {}; store(KEYS.stats, stats); openSheet('stats'); }
       else { t.dataset.armed = '1'; t.firstChild.textContent = 'Tap again to reset'; }
     }
