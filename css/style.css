@@ -379,17 +379,71 @@ button.row:active { background: var(--peer); }
 .key.armed { background: var(--accent); border-color: var(--accent); }
 .key.armed .d, .pad.notes .key.armed .d, .key.armed .n { color: var(--accent-ink); }
 
-/* ---------- Completion animations ---------- */
-.cell .fx { position: absolute; inset: 0; pointer-events: none; border-radius: 1px; opacity: 0; }
-.cell .fx.go { animation: flash .6s ease-out both; }
-.cell .fx.wave { animation: flash .8s ease-out both; }
-@keyframes flash {
-  0%   { opacity: 0; background: var(--accent); }
-  30%  { opacity: .45; background: var(--accent); }
-  100% { opacity: 0; background: var(--accent); }
+/* ---------- Completion animations ----------
+   Only transform and opacity animate, so the phone's GPU does the work. */
+#fx-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; border-radius: 6px; z-index: 1; }
+.board-overlay { z-index: 2; }
+.rip-clip { position: absolute; overflow: hidden; border-radius: 2px; }
+.rip-fill, .rip-ring {
+  position: absolute;
+  border-radius: 50%;
+  transform: scale(0);
+  opacity: 0;
+  will-change: transform, opacity;
 }
-.no-anim .cell .fx.go, .no-anim .cell .fx.wave { animation: none; }
-.no-anim .panel { animation: none; }
+.rip-fill {
+  background: radial-gradient(circle, transparent 0 52%, color-mix(in srgb, var(--accent) 34%, transparent) 70%, color-mix(in srgb, var(--accent) 16%, transparent) 100%);
+  animation: rip-fill 760ms cubic-bezier(.25, .46, .45, .94) both; /* ease-out-quad, matches RIPPLE_MS */
+}
+.rip-ring {
+  border: 2px solid var(--accent);
+  animation: rip-ring 900ms cubic-bezier(.25, .46, .45, .94) both;
+}
+@keyframes rip-fill {
+  0%   { transform: scale(0);   opacity: 1; }
+  70%  { opacity: .8; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+@keyframes rip-ring {
+  0%   { transform: scale(.04); opacity: .9; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+
+/* The square's own soft wash as the wave passes */
+.cell .fx { position: absolute; inset: 0; pointer-events: none; opacity: 0; background: var(--accent); }
+.cell .fx.go { animation: wash .7s ease-out both; }
+@keyframes wash {
+  0%   { opacity: 0; }
+  25%  { opacity: .22; }
+  100% { opacity: 0; }
+}
+
+/* Digit pop: a quick springy bounce */
+.cell .v { display: inline-block; transform-origin: 50% 55%; }
+.cell .v.pop { animation: pop .52s cubic-bezier(.34, 1.56, .64, 1) both; }
+.cell .v.pop-big { animation: pop-big .62s cubic-bezier(.34, 1.56, .64, 1) both; }
+@keyframes pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.24); }
+  100% { transform: scale(1); }
+}
+@keyframes pop-big {
+  0%   { transform: scale(1) rotate(0); }
+  35%  { transform: scale(1.38) rotate(-6deg); }
+  65%  { transform: scale(.94) rotate(3deg); }
+  100% { transform: scale(1) rotate(0); }
+}
+
+/* Keypad key celebrates when all nine of its digit are placed */
+.key.key-pop { animation: key-pop .7s cubic-bezier(.34, 1.56, .64, 1) both; }
+@keyframes key-pop {
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  40%  { transform: scale(1.14); }
+  100% { transform: scale(1); box-shadow: 0 0 0 14px transparent; }
+}
+
+.no-anim #fx-layer, .no-anim .cell .fx { display: none; }
+.no-anim .cell .v, .no-anim .key, .no-anim .panel { animation: none !important; }
 
 /* ---------- Show / hide ---------- */
 .hide-counts .key .n { display: none; }

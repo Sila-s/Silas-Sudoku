@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0'; // keep in sync with sw.js
+  const VERSION = '1.3.0'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -156,6 +156,7 @@
       else if (name === 'erase') tone(c, 420, t, 0.06, 0.05);
       else if (name === 'mistake') { tone(c, 220, t, 0.14, 0.08, 'triangle'); tone(c, 175, t + 0.1, 0.18, 0.08, 'triangle'); }
       else if (name === 'unit') [660, 880, 1100].forEach((f, k) => tone(c, f, t + k * 0.06, 0.12, 0.05));
+      else if (name === 'number') [784, 988, 1175, 1568].forEach((f, k) => tone(c, f, t + k * 0.055, 0.16, 0.05));
       else if (name === 'solved') [523, 659, 784, 1047].forEach((f, k) => tone(c, f, t + k * 0.09, 0.3, 0.06));
     }
     return { play, unlock: ensure };
@@ -164,32 +165,110 @@
   ['touchend', 'click'].forEach((ev) => document.addEventListener(ev, () => { if (settings.sounds) Sound.unlock(); }, { passive: true }));
 
   // ---------- Completion animations ----------
-  function flashCells(list, cls) {
-    if (!settings.animations) return;
-    for (const [i, delay] of list) {
-      const fx = fxSpans[i];
-      fx.classList.remove('go', 'wave');
-      void fx.offsetWidth; // restart the animation
-      fx.style.animationDelay = delay + 'ms';
-      fx.classList.add(cls);
+  // A ripple is a circle of the accent colour (plus a thin ring just behind it)
+  // that grows from the square you just filled, clipped to the finished row,
+  // column or box. Each digit "pops" at the moment the wave front reaches it.
+  const RIPPLE_MS = 760; // keep in sync with .rip-fill in style.css
+  const fxLayer = $('#fx-layer');
+  function rectOf(list) {
+    const b = fxLayer.getBoundingClientRect();
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    for (const i of list) {
+      const r = cells[i].getBoundingClientRect();
+      x1 = Math.min(x1, r.left); y1 = Math.min(y1, r.top); x2 = Math.max(x2, r.right); y2 = Math.max(y2, r.bottom);
     }
+    return { x: x1 - b.left, y: y1 - b.top, w: x2 - x1, h: y2 - y1 };
+  }
+  // Delay until an ease-out-quad wave of radius `rad` reaches distance `dist`.
+  const arrival = (dist, rad, ms) => ms * (1 - Math.sqrt(Math.max(0, 1 - Math.min(1, dist / rad))));
+  function ripple(area, origin, opts) {
+    opts = opts || {};
+    const R = rectOf(area);
+    const o = rectOf([origin]);
+    const cx = o.x + o.w / 2 - R.x, cy = o.y + o.h / 2 - R.y;
+    const rad = opts.radius || Math.max(Math.hypot(cx, cy), Math.hypot(R.w - cx, cy), Math.hypot(cx, R.h - cy), Math.hypot(R.w - cx, R.h - cy)) + 2;
+    const clip = document.createElement('div');
+    clip.className = 'rip-clip';
+    Object.assign(clip.style, { left: R.x + 'px', top: R.y + 'px', width: R.w + 'px', height: R.h + 'px' });
+    const parts = opts.ringOnly ? [['rip-ring', 0]] : [['rip-fill', 0], ['rip-ring', 110]];
+    for (const [cls, delay] of parts) {
+      const c = document.createElement('span');
+      c.className = cls;
+      Object.assign(c.style, { width: 2 * rad + 'px', height: 2 * rad + 'px', left: cx - rad + 'px', top: cy - rad + 'px', animationDelay: (opts.delay || 0) + delay + 'ms' });
+      clip.appendChild(c);
+    }
+    fxLayer.appendChild(clip);
+    setTimeout(() => clip.remove(), (opts.delay || 0) + 1500);
+    return { cx: cx + R.x, cy: cy + R.y, rad };
+  }
+  function pop(i, delay, big) {
+    const v = valSpans[i];
+    v.classList.remove('pop', 'pop-big');
+    void v.offsetWidth; // restart the animation
+    v.style.animationDelay = delay + 'ms';
+    v.classList.add(big ? 'pop-big' : 'pop');
+    const fx = fxSpans[i];
+    fx.classList.remove('go');
+    void fx.offsetWidth;
+    fx.style.animationDelay = delay + 'ms';
+    fx.classList.add('go');
+  }
+  function popAlongWave(list, wave, ms, big, pops) {
+    const b = fxLayer.getBoundingClientRect();
+    for (const c of list) {
+      const r = cells[c].getBoundingClientRect();
+      const d = Math.hypot(r.left - b.left + r.width / 2 - wave.cx, r.top - b.top + r.height / 2 - wave.cy);
+      const t = arrival(d, wave.rad, ms);
+      if (!pops.has(c) || pops.get(c) > t) pops.set(c, t);
+    }
+    void big;
   }
   const unitDone = (u) => E.UNITS[u].every((c) => game.values[c] === game.solution[c]);
-  function celebrateUnits(i) {
-    const us = [E.rowOf(i), 9 + E.colOf(i), 18 + E.boxOf(i)].filter(unitDone);
-    if (!us.length) return false;
-    const cellsToFlash = new Map();
-    for (const u of us) for (const c of E.UNITS[u]) {
-      const dist = Math.abs(E.rowOf(c) - E.rowOf(i)) + Math.abs(E.colOf(c) - E.colOf(i));
-      cellsToFlash.set(c, dist * 35);
+  const digitDone = (d) => game.solution.every((v, c) => v !== d || game.values[c] === d);
+  // Returns what was completed so the caller can pick a sound.
+  function celebrate(i) {
+    const units = [E.rowOf(i), 9 + E.colOf(i), 18 + E.boxOf(i)].filter(unitDone);
+    const d = game.values[i];
+    const number = digitDone(d);
+    if (!units.length && !number) return null;
+    if (!settings.animations) return number ? 'number' : 'unit';
+    const pops = new Map();
+    for (const u of units) {
+      const wave = ripple(E.UNITS[u], i);
+      popAlongWave(E.UNITS[u], wave, RIPPLE_MS, false, pops);
     }
-    flashCells(cellsToFlash, 'go');
-    return true;
+    if (number) {
+      // A ring blooms out of every square holding this digit, nearest first.
+      const all = [];
+      for (let c = 0; c < 81; c++) if (game.values[c] === d) all.push(c);
+      const dist = (c) => Math.hypot(E.rowOf(c) - E.rowOf(i), E.colOf(c) - E.colOf(i));
+      all.sort((a, b) => dist(a) - dist(b));
+      const cellW = cells[0].getBoundingClientRect().width;
+      all.forEach((c, k) => {
+        const delay = k * 70;
+        ripple([...Array(81).keys()], c, { ringOnly: true, radius: cellW * 1.5, delay });
+        const prev = pops.get(c);
+        pops.set(c, prev === undefined ? delay : Math.min(prev, delay));
+      });
+      const key = keys[d - 1];
+      key.classList.remove('key-pop');
+      void key.offsetWidth;
+      key.style.animationDelay = all.length * 70 + 'ms';
+      key.classList.add('key-pop');
+    }
+    for (const [c, t] of pops) pop(c, t, number && game.values[c] === d);
+    return number ? 'number' : 'unit';
   }
   function celebrateSolved(i) {
-    const list = [];
-    for (let c = 0; c < 81; c++) list.push([c, (Math.abs(E.rowOf(c) - E.rowOf(i)) + Math.abs(E.colOf(c) - E.colOf(i))) * 45]);
-    flashCells(list, 'wave');
+    const all = [...Array(81).keys()];
+    const wave = ripple(all, i);
+    const pops = new Map();
+    popAlongWave(all, wave, RIPPLE_MS, true, pops);
+    for (const [c, t] of pops) pop(c, t, false);
+    setTimeout(() => {
+      const wave2 = ripple(all, i, { ringOnly: true });
+      void wave2;
+    }, 260);
   }
 
   // ---------- Moves ----------
@@ -242,7 +321,8 @@
     lastPlaced = i;
     commit(ch);
     if (game.completed || game.failed) return;
-    if (d === game.solution[i] && celebrateUnits(i)) Sound.play('unit');
+    const won = d === game.solution[i] ? celebrate(i) : null;
+    if (won) Sound.play(won);
     else if (!quiet) Sound.play('place');
   }
   function inputDigit(d) {
@@ -326,7 +406,7 @@
     Sound.play('solved');
     if (settings.animations) {
       celebrateSolved(lastPlaced);
-      setTimeout(() => { if (game.completed) openSheet('complete', { isBest }); }, 1100);
+      setTimeout(() => { if (game.completed) openSheet('complete', { isBest }); }, 1500);
     } else {
       openSheet('complete', { isBest });
     }
@@ -418,6 +498,7 @@
       el.setAttribute('role', 'gridcell');
       const v = document.createElement('span');
       v.className = 'v';
+      v.addEventListener('animationend', () => v.classList.remove('pop', 'pop-big'));
       const notes = document.createElement('div');
       notes.className = 'notes';
       const spans = [];
@@ -441,6 +522,7 @@
     k.setAttribute('aria-label', String(d));
     k.innerHTML = '<span class="d">' + d + '</span><span class="n"></span>';
     pad.appendChild(k);
+    k.addEventListener('animationend', () => k.classList.remove('key-pop'));
     keys.push(k);
   }
 
