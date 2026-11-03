@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.1'; // keep in sync with sw.js
+  const VERSION = '1.4.2'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -17,6 +17,16 @@
   const settings = Object.assign({ mistakeMode: 'conflicts', smartNotes: true, highlight: true, mistakeLimit: true }, Look.DEFAULTS, load(KEYS.settings, {}));
   const saveSettings = () => { store(KEYS.settings, settings); Look.apply(settings); };
   Look.onSystemThemeChange(() => { if (settings.theme === 'auto') Look.apply(settings); });
+  // iOS only reads the status-bar colour when the app loads, so after the theme
+  // changes we save and reload once (with the menu closed) to repaint that strip.
+  const launchTheme = Look.resolveTheme(settings.theme);
+  function reloadIfThemeChanged() {
+    if (Look.resolveTheme(settings.theme) === launchTheme) return false;
+    stopClock();
+    saveGame();
+    location.reload();
+    return true;
+  }
   let stats = load(KEYS.stats, {});
   const pool = load(KEYS.pool, {});
   let game = load(KEYS.game, null);
@@ -774,7 +784,11 @@
     if (!force && !game) return; // first launch: must choose a difficulty
     if (sheet.hidden) return;
     sheetView = null;
-    const finish = () => { sheet.hidden = true; sheet.classList.remove('closing'); render(); startClock(); };
+    const finish = () => {
+      sheet.hidden = true; sheet.classList.remove('closing');
+      if (game && reloadIfThemeChanged()) return;
+      render(); startClock();
+    };
     if (settings.animations) {
       sheet.classList.add('closing'); // slides down, then hides
       clearTimeout(closeTimer);
@@ -934,7 +948,9 @@
 
   // Pause the clock and save whenever the app goes to the background.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { stopClock(); saveGame(); } else { startClock(); render(); }
+    if (document.hidden) { stopClock(); saveGame(); return; }
+    if (sheet.hidden && game && reloadIfThemeChanged()) return; // Auto theme flipped while away
+    startClock(); render();
   });
   window.addEventListener('pagehide', () => { stopClock(); saveGame(); });
 
