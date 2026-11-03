@@ -323,3 +323,7 @@ button.row:active { background: var(--peer); }
   .tool { height: 50px; }
 }
 #hint-text .muted { color: var(--ink-soft); }
+
+/* Notes mode: the digit picked on the pad to pencil into tapped squares */
+.key.armed { background: var(--accent); border-color: var(--accent); }
+.key.armed .d, .pad.notes .key.armed .d, .key.armed .n { color: var(--accent-ink); }

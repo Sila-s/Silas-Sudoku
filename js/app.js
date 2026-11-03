@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0'; // keep in sync with sw.js
+  const VERSION = '1.1.0'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -13,15 +13,18 @@
   const load = (k, def) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : def; } catch (e) { return def; } };
   const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage full or blocked */ } };
 
-  const settings = Object.assign({ mistakeMode: 'conflicts', smartNotes: true, highlight: true }, load(KEYS.settings, {}));
+  const settings = Object.assign({ mistakeMode: 'conflicts', smartNotes: true, highlight: true, mistakeLimit: true }, load(KEYS.settings, {}));
   let stats = load(KEYS.stats, {});
   const pool = load(KEYS.pool, {});
   let game = load(KEYS.game, null);
   if (game && !(Array.isArray(game.values) && game.values.length === 81)) game = null;
+  if (game) { game.mistakes = game.mistakes || 0; game.failed = !!game.failed; } // saves from v1.0
+  const MAX_MISTAKES = 3;
 
   // ---------- UI state ----------
   let selected = -1;
   let notesMode = false;
+  let noteDigit = 0; // in notes mode: the digit chosen on the pad, applied to each square tapped
   let paused = false;
   let loading = false;
   let hint = null;
@@ -32,7 +35,7 @@
   // ---------- Clock ----------
   const elapsed = () => (game ? game.elapsed + (runningSince ? Date.now() - runningSince : 0) : 0);
   function startClock() {
-    if (!game || game.completed || paused || loading || document.hidden || runningSince || !$('#sheet').hidden) return;
+    if (!game || game.completed || game.failed || paused || loading || document.hidden || runningSince || !$('#sheet').hidden) return;
     runningSince = Date.now();
   }
   function stopClock() {
@@ -90,14 +93,14 @@
   async function newGame(diff) {
     closeSheet(true);
     stopClock();
-    hint = null; selected = -1; notesMode = false; paused = false;
+    hint = null; selected = -1; notesMode = false; noteDigit = 0; paused = false;
     loading = !pool[diff];
     render();
     const p = await takePuzzle(diff);
     game = {
       difficulty: diff, puzzle: p.puzzle, solution: p.solution,
       values: p.puzzle.slice(), notes: new Array(81).fill(0),
-      history: [], future: [], elapsed: 0, hintsUsed: 0, completed: false,
+      history: [], future: [], elapsed: 0, hintsUsed: 0, completed: false, mistakes: 0, failed: false,
     };
     loading = false; warnedFull = false;
     saveGame();
@@ -108,12 +111,12 @@
   function restart() {
     if (!game) return;
     stopClock();
-    Object.assign(game, { values: game.puzzle.slice(), notes: new Array(81).fill(0), history: [], future: [], elapsed: 0, hintsUsed: 0, completed: false });
-    hint = null; selected = -1; paused = false; warnedFull = false;
+    Object.assign(game, { values: game.puzzle.slice(), notes: new Array(81).fill(0), history: [], future: [], elapsed: 0, hintsUsed: 0, completed: false, mistakes: 0, failed: false });
+    hint = null; selected = -1; paused = false; warnedFull = false; notesMode = false; noteDigit = 0;
     saveGame();
     closeSheet();
   }
-  const canPlay = () => game && !game.completed && !paused && !loading;
+  const canPlay = () => game && !game.completed && !game.failed && !paused && !loading;
 
   // ---------- Moves ----------
   // changes: [{i, v, n}] -> new value / notes per cell. Recorded for undo.
@@ -168,13 +171,47 @@
     const i = selected;
     if (game.puzzle[i]) return;
     if (notesMode) {
-      if (game.values[i]) return;
-      commit([{ i, v: 0, n: game.notes[i] ^ (1 << d) }]);
-    } else if (game.values[i] === d) {
-      commit([{ i, v: 0, n: 0 }]);
-    } else {
-      placeValue(i, d);
+      if (!game.values[i]) commit([{ i, v: 0, n: game.notes[i] ^ (1 << d) }]);
+      return;
     }
+    if (game.values[i] === d) {
+      commit([{ i, v: 0, n: 0 }]);
+      return;
+    }
+    const wrong = settings.mistakeLimit && d !== game.solution[i];
+    if (wrong) game.mistakes++;
+    placeValue(i, d);
+    if (wrong) {
+      if (game.mistakes >= MAX_MISTAKES) fail();
+      else toast('Mistake ' + game.mistakes + ' of ' + MAX_MISTAKES);
+    }
+  }
+  // Pad press: in notes mode it picks the digit to pencil in; otherwise it fills the selected square.
+  function padDigit(d) {
+    if (!canPlay()) return;
+    if (notesMode) { noteDigit = noteDigit === d ? 0 : d; render(); return; }
+    inputDigit(d);
+  }
+  function toggleNote(i) {
+    if (game.puzzle[i] || game.values[i]) return;
+    commit([{ i, v: 0, n: game.notes[i] ^ (1 << noteDigit) }]);
+  }
+  function setNotesMode(on) {
+    if (!canPlay()) return;
+    notesMode = on;
+    noteDigit = 0;
+    render();
+  }
+  function fail() {
+    stopClock();
+    game.failed = true;
+    selected = -1; notesMode = false; noteDigit = 0; hint = null;
+    const s = stats[game.difficulty] || (stats[game.difficulty] = { completed: 0, best: null, total: 0 });
+    s.failed = (s.failed || 0) + 1;
+    store(KEYS.stats, stats);
+    saveGame();
+    render();
+    openSheet('failed');
   }
   function erase() {
     if (!canPlay() || selected < 0 || game.puzzle[selected]) return;
@@ -195,7 +232,7 @@
   function complete() {
     stopClock();
     game.completed = true;
-    selected = -1; notesMode = false; hint = null;
+    selected = -1; notesMode = false; noteDigit = 0; hint = null;
     const s = stats[game.difficulty] || (stats[game.difficulty] = { completed: 0, best: null, total: 0 });
     s.completed++;
     s.total += game.elapsed;
@@ -208,7 +245,12 @@
 
   // ---------- Hints ----------
   function requestHint() {
-    if (!canPlay()) return;
+    if (!canPlay() || (hint && hint.kind === 'confirm')) return;
+    if (!E.findHint(game.values, game.solution)) return;
+    hint = { kind: 'confirm' };
+    render();
+  }
+  function showHint() {
     const h = E.findHint(game.values, game.solution);
     if (!h) return;
     game.hintsUsed++;
@@ -226,6 +268,7 @@
   }
   function hintAction() {
     if (!hint || !canPlay()) return;
+    if (hint.kind === 'confirm') { showHint(); return; }
     if (hint.kind === 'wrong') { const c = hint.cell; hint = null; commit([{ i: c, v: 0, n: 0 }]); return; }
     if (hint.kind === 'reveal') { placeValue(hint.cell, hint.digit); return; }
     const s = hint.steps[hint.index];
@@ -235,8 +278,12 @@
   }
   function hintView() {
     if (!hint) return null;
-    const v = { pattern: new Set(), elim: new Set(), target: -1, text: '', action: '' };
-    if (hint.kind === 'wrong') {
+    const v = { pattern: new Set(), elim: new Set(), target: -1, text: '', action: '', close: 'Close' };
+    if (hint.kind === 'confirm') {
+      v.text = '<b>Use a hint?</b> It will be added to this puzzle\u2019s hint count.';
+      v.action = 'Show hint';
+      v.close = 'Cancel';
+    } else if (hint.kind === 'wrong') {
       v.target = hint.cell;
       v.text = 'This entry isn’t right.';
       v.action = 'Erase it';
@@ -313,11 +360,11 @@
     $('#overlay-loading').hidden = !loading;
 
     const values = has ? game.values : new Array(81).fill(0);
-    const focus = has && selected >= 0 && settings.highlight ? values[selected] : 0;
+    const focus = notesMode && noteDigit ? noteDigit : has && selected >= 0 && settings.highlight ? values[selected] : 0;
     const hv = hintView();
     const bad = new Set();
     if (has) {
-      if (settings.mistakeMode === 'solution') {
+      if (settings.mistakeLimit || settings.mistakeMode === 'solution') {
         for (let i = 0; i < 81; i++) if (values[i] && !game.puzzle[i] && values[i] !== game.solution[i]) bad.add(i);
       } else {
         for (let i = 0; i < 81; i++) {
@@ -360,6 +407,7 @@
       keys[d - 1].querySelector('.n').textContent = has ? (left > 0 ? left : '') : '';
     }
     pad.classList.toggle('notes', notesMode);
+    for (let d = 1; d <= 9; d++) keys[d - 1].classList.toggle('armed', notesMode && noteDigit === d);
 
     const playable = canPlay();
     $('#t-undo').disabled = !playable || !game.history.length;
@@ -373,13 +421,17 @@
 
     const bar = $('#hintbar');
     bar.hidden = !hv;
+    if (hv) $('#toast').classList.remove('show');
     if (hv) {
       $('#hint-text').innerHTML = hv.text;
       $('#hint-action').textContent = hv.action;
+      $('#hint-close').textContent = hv.close;
     }
   }
   function updateTime() {
-    $('#lbl-time').textContent = game ? fmt(elapsed()) : '';
+    let t = game ? fmt(elapsed()) : '';
+    if (game && settings.mistakeLimit) t += ' \u00b7 Mistakes ' + game.mistakes + '/' + MAX_MISTAKES;
+    $('#lbl-time').textContent = t;
   }
   setInterval(updateTime, 500);
 
@@ -411,13 +463,16 @@
         + '<button class="row" data-act="settings"><span>Settings</span>' + chev + '</button></div>';
     } else if (view === 'settings') {
       html += backBtn + '<h2>Settings</h2><div class="list">'
-        + '<div class="row"><span>Mistakes</span><div class="seg">'
+        + (settings.mistakeLimit ? '' : '<div class="row"><span>Mark mistakes</span><div class="seg">'
         + '<button data-mm="conflicts" class="' + (settings.mistakeMode === 'conflicts' ? 'on' : '') + '">Rule breaks</button>'
-        + '<button data-mm="solution" class="' + (settings.mistakeMode === 'solution' ? 'on' : '') + '">Wrong digits</button></div></div>'
+        + '<button data-mm="solution" class="' + (settings.mistakeMode === 'solution' ? 'on' : '') + '">Wrong digits</button></div></div>')
+        + '<button class="row" data-toggle="mistakeLimit"><span>Game over after 3 mistakes</span><span class="switch' + (settings.mistakeLimit ? ' on' : '') + '"></span></button>'
         + '<button class="row" data-toggle="smartNotes"><span>Auto-remove notes</span><span class="switch' + (settings.smartNotes ? ' on' : '') + '"></span></button>'
         + '<button class="row" data-toggle="highlight"><span>Highlight row, column &amp; digit</span><span class="switch' + (settings.highlight ? ' on' : '') + '"></span></button>'
         + '</div>'
-        + '<p class="note"><b>Rule breaks</b> marks a digit only when it clashes with another in its row, column or box. <b>Wrong digits</b> checks every entry against the solution.</p>'
+        + '<p class="note">' + (settings.mistakeLimit
+          ? 'Any wrong digit is marked in red and counts as a mistake. The third mistake ends the game.'
+          : '<b>Rule breaks</b> marks a digit only when it clashes with another in its row, column or box. <b>Wrong digits</b> checks every entry against the solution.') + '</p>'
         + '<h3>About</h3><div class="list"><div class="row"><span>Version</span><span class="val">' + VERSION + '</span></div></div>';
     } else if (view === 'stats') {
       html += backBtn + '<h2>Statistics</h2><div class="list">';
@@ -428,6 +483,10 @@
         html += '<div class="row"><span>' + LABEL[d] + '</span><span class="val">' + (s ? s.completed : 0) + ' solved · best ' + best + ' · avg ' + avg + '</span></div>';
       }
       html += '</div><h3>&nbsp;</h3><div class="list"><button class="row danger" data-act="reset-stats"><span>Reset statistics</span></button></div>';
+    } else if (view === 'failed') {
+      html += '<h2>Game over</h2><p class="sub">' + MAX_MISTAKES + ' mistakes \u00b7 ' + LABEL[game.difficulty] + ' \u00b7 ' + fmt(game.elapsed) + '</p>'
+        + '<div class="list"><button class="row" data-act="retry"><span>Try this puzzle again</span>' + chev + '</button></div>'
+        + '<h3>New game</h3>' + diffGrid();
     } else if (view === 'complete') {
       html += '<h2>Solved</h2><p class="sub">' + LABEL[game.difficulty] + (opts.isBest ? ' · new best time' : '') + (game.hintsUsed ? ' · ' + game.hintsUsed + ' hint' + (game.hintsUsed > 1 ? 's' : '') : '') + '</p>'
         + '<div class="done-time">' + fmt(game.elapsed) + '</div>'
@@ -435,6 +494,7 @@
     }
     panel.innerHTML = html;
     sheet.hidden = false;
+    $('#toast').classList.remove('show');
   }
   function closeSheet(force) {
     if (!force && !game) return; // first launch: must choose a difficulty
@@ -448,9 +508,10 @@
     if (!t) return;
     if (t.dataset.new) return newGame(t.dataset.new);
     if (t.dataset.mm) { settings.mistakeMode = t.dataset.mm; store(KEYS.settings, settings); openSheet('settings'); return; }
-    if (t.dataset.toggle) { const k = t.dataset.toggle; settings[k] = !settings[k]; store(KEYS.settings, settings); openSheet('settings'); return; }
+    if (t.dataset.toggle) { const k = t.dataset.toggle; settings[k] = !settings[k]; store(KEYS.settings, settings); openSheet('settings'); render(); return; }
     const act = t.dataset.act;
-    if (act === 'menu' || act === 'stats' || act === 'settings') openSheet(act);
+    if (act === 'retry') restart();
+    else if (act === 'menu' || act === 'stats' || act === 'settings') openSheet(act);
     else if (act === 'restart') {
       if (restartArmed) restart();
       else { restartArmed = true; $('#restart-hint').textContent = 'Tap again to confirm'; }
@@ -460,7 +521,7 @@
     }
   });
   $('#sheet-backdrop').addEventListener('click', () => {
-    if (sheetView === 'complete' && game && game.completed) return; // choose next game
+    if (game && (game.completed || game.failed)) return; // choose what to play next
     closeSheet();
   });
 
@@ -493,16 +554,17 @@
     const c = e.target.closest('.cell');
     if (!c || !canPlay()) return;
     selected = Number(c.dataset.i);
+    if (notesMode && noteDigit) toggleNote(selected);
     render();
   });
   onTap(pad, (e) => {
     const k = e.target.closest('.key');
-    if (k) inputDigit(Number(k.dataset.d));
+    if (k) padDigit(Number(k.dataset.d));
   });
   onTap($('#t-undo'), undo);
   onTap($('#t-redo'), redo);
   onTap($('#t-erase'), erase);
-  onTap($('#t-notes'), () => { if (canPlay()) { notesMode = !notesMode; render(); } });
+  onTap($('#t-notes'), () => setNotesMode(!notesMode));
   onTap($('#t-auto'), fillAllNotes);
   onTap($('#t-hint'), requestHint);
   onTap($('#hint-action'), hintAction);
@@ -515,9 +577,9 @@
   // Keyboard (handy when testing on a computer)
   document.addEventListener('keydown', (e) => {
     if (!sheet.hidden) { if (e.key === 'Escape') closeSheet(); return; }
-    if (/^[1-9]$/.test(e.key)) { inputDigit(Number(e.key)); return; }
+    if (/^[1-9]$/.test(e.key)) { padDigit(Number(e.key)); return; }
     if (e.key === 'Backspace' || e.key === 'Delete' || e.key === '0') { erase(); return; }
-    if (e.key === 'n' || e.key === 'N') { if (canPlay()) { notesMode = !notesMode; render(); } return; }
+    if (e.key === 'n' || e.key === 'N') { setNotesMode(!notesMode); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     const mv = { ArrowUp: -9, ArrowDown: 9, ArrowLeft: -1, ArrowRight: 1 }[e.key];
     if (mv && canPlay()) {
@@ -573,6 +635,7 @@
   render();
   if (!game) openSheet('menu');
   else if (game.completed) openSheet('complete', {});
+  else if (game.failed) openSheet('failed');
   else startClock();
   setTimeout(refillPool, 300);
 
