@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0'; // keep in sync with sw.js
+  const VERSION = '1.2.0'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -13,7 +13,10 @@
   const load = (k, def) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : def; } catch (e) { return def; } };
   const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage full or blocked */ } };
 
-  const settings = Object.assign({ mistakeMode: 'conflicts', smartNotes: true, highlight: true, mistakeLimit: true }, load(KEYS.settings, {}));
+  const Look = window.SudokuLook;
+  const settings = Object.assign({ mistakeMode: 'conflicts', smartNotes: true, highlight: true, mistakeLimit: true }, Look.DEFAULTS, load(KEYS.settings, {}));
+  const saveSettings = () => { store(KEYS.settings, settings); Look.apply(settings); };
+  Look.onSystemThemeChange(() => { if (settings.theme === 'auto') Look.apply(settings); });
   let stats = load(KEYS.stats, {});
   const pool = load(KEYS.pool, {});
   let game = load(KEYS.game, null);
@@ -118,6 +121,77 @@
   }
   const canPlay = () => game && !game.completed && !game.failed && !paused && !loading;
 
+  // ---------- Sound (synthesised, so it works offline with no audio files) ----------
+  const Sound = (() => {
+    let ctx = null;
+    function ensure() {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      if (!ctx) {
+        // 'ambient' lets iPhone mute these with the silent switch and not interrupt music.
+        try { if (navigator.audioSession) navigator.audioSession.type = 'ambient'; } catch (e) { /* not supported */ }
+        try { ctx = new AC(); } catch (e) { return null; }
+      }
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      return ctx;
+    }
+    function tone(c, freq, at, dur, vol, type) {
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = type || 'sine';
+      o.frequency.setValueAtTime(freq, at);
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(vol, at + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      o.connect(g).connect(c.destination);
+      o.start(at);
+      o.stop(at + dur + 0.02);
+    }
+    function play(name) {
+      if (!settings.sounds) return;
+      const c = ensure();
+      if (!c) return;
+      const t = c.currentTime + 0.005;
+      if (name === 'place') tone(c, 740, t, 0.07, 0.07);
+      else if (name === 'note') tone(c, 1180, t, 0.04, 0.035);
+      else if (name === 'erase') tone(c, 420, t, 0.06, 0.05);
+      else if (name === 'mistake') { tone(c, 220, t, 0.14, 0.08, 'triangle'); tone(c, 175, t + 0.1, 0.18, 0.08, 'triangle'); }
+      else if (name === 'unit') [660, 880, 1100].forEach((f, k) => tone(c, f, t + k * 0.06, 0.12, 0.05));
+      else if (name === 'solved') [523, 659, 784, 1047].forEach((f, k) => tone(c, f, t + k * 0.09, 0.3, 0.06));
+    }
+    return { play, unlock: ensure };
+  })();
+  // iOS only allows audio to start from a real tap.
+  ['touchend', 'click'].forEach((ev) => document.addEventListener(ev, () => { if (settings.sounds) Sound.unlock(); }, { passive: true }));
+
+  // ---------- Completion animations ----------
+  function flashCells(list, cls) {
+    if (!settings.animations) return;
+    for (const [i, delay] of list) {
+      const fx = fxSpans[i];
+      fx.classList.remove('go', 'wave');
+      void fx.offsetWidth; // restart the animation
+      fx.style.animationDelay = delay + 'ms';
+      fx.classList.add(cls);
+    }
+  }
+  const unitDone = (u) => E.UNITS[u].every((c) => game.values[c] === game.solution[c]);
+  function celebrateUnits(i) {
+    const us = [E.rowOf(i), 9 + E.colOf(i), 18 + E.boxOf(i)].filter(unitDone);
+    if (!us.length) return false;
+    const cellsToFlash = new Map();
+    for (const u of us) for (const c of E.UNITS[u]) {
+      const dist = Math.abs(E.rowOf(c) - E.rowOf(i)) + Math.abs(E.colOf(c) - E.colOf(i));
+      cellsToFlash.set(c, dist * 35);
+    }
+    flashCells(cellsToFlash, 'go');
+    return true;
+  }
+  function celebrateSolved(i) {
+    const list = [];
+    for (let c = 0; c < 81; c++) list.push([c, (Math.abs(E.rowOf(c) - E.rowOf(i)) + Math.abs(E.colOf(c) - E.colOf(i))) * 45]);
+    flashCells(list, 'wave');
+  }
+
   // ---------- Moves ----------
   // changes: [{i, v, n}] -> new value / notes per cell. Recorded for undo.
   function commit(changes) {
@@ -158,29 +232,35 @@
     hint = null;
     afterChange();
   }
-  function placeValue(i, d) {
+  let lastPlaced = 40;
+  function placeValue(i, d, quiet) {
     const ch = [{ i, v: d, n: 0 }];
     if (settings.smartNotes) {
       const bit = 1 << d;
       for (const p of E.PEERS[i]) if (game.notes[p] & bit) ch.push({ i: p, v: game.values[p], n: game.notes[p] & ~bit });
     }
+    lastPlaced = i;
     commit(ch);
+    if (game.completed || game.failed) return;
+    if (d === game.solution[i] && celebrateUnits(i)) Sound.play('unit');
+    else if (!quiet) Sound.play('place');
   }
   function inputDigit(d) {
     if (!canPlay() || selected < 0) return;
     const i = selected;
     if (game.puzzle[i]) return;
     if (notesMode) {
-      if (!game.values[i]) commit([{ i, v: 0, n: game.notes[i] ^ (1 << d) }]);
+      if (!game.values[i]) { commit([{ i, v: 0, n: game.notes[i] ^ (1 << d) }]); Sound.play('note'); }
       return;
     }
     if (game.values[i] === d) {
       commit([{ i, v: 0, n: 0 }]);
+      Sound.play('erase');
       return;
     }
     const wrong = settings.mistakeLimit && d !== game.solution[i];
-    if (wrong) game.mistakes++;
-    placeValue(i, d);
+    if (wrong) { game.mistakes++; Sound.play('mistake'); }
+    placeValue(i, d, wrong);
     if (wrong) {
       if (game.mistakes >= MAX_MISTAKES) fail();
       else toast('Mistake ' + game.mistakes + ' of ' + MAX_MISTAKES);
@@ -195,6 +275,7 @@
   function toggleNote(i) {
     if (game.puzzle[i] || game.values[i]) return;
     commit([{ i, v: 0, n: game.notes[i] ^ (1 << noteDigit) }]);
+    Sound.play('note');
   }
   function setNotesMode(on) {
     if (!canPlay()) return;
@@ -215,7 +296,9 @@
   }
   function erase() {
     if (!canPlay() || selected < 0 || game.puzzle[selected]) return;
+    if (!game.values[selected] && !game.notes[selected]) return;
     commit([{ i: selected, v: 0, n: 0 }]);
+    Sound.play('erase');
   }
   function fillAllNotes() {
     if (!canPlay()) return;
@@ -240,7 +323,13 @@
     if (isBest) s.best = game.elapsed;
     store(KEYS.stats, stats);
     saveGame();
-    openSheet('complete', { isBest });
+    Sound.play('solved');
+    if (settings.animations) {
+      celebrateSolved(lastPlaced);
+      setTimeout(() => { if (game.completed) openSheet('complete', { isBest }); }, 1100);
+    } else {
+      openSheet('complete', { isBest });
+    }
   }
 
   // ---------- Hints ----------
@@ -317,6 +406,7 @@
   const cells = new Array(81);
   const noteSpans = new Array(81);
   const valSpans = new Array(81);
+  const fxSpans = new Array(81);
   for (let b = 0; b < 9; b++) {
     const box = document.createElement('div');
     box.className = 'box';
@@ -332,7 +422,11 @@
       notes.className = 'notes';
       const spans = [];
       for (let d = 1; d <= 9; d++) { const s = document.createElement('span'); notes.appendChild(s); spans.push(s); }
-      el.append(v, notes);
+      const fx = document.createElement('span');
+      fx.className = 'fx';
+      fx.addEventListener('animationend', () => fx.classList.remove('go', 'wave'));
+      el.append(v, notes, fx);
+      fxSpans[i] = fx;
       box.appendChild(el);
       cells[i] = el; valSpans[i] = v; noteSpans[i] = spans;
     }
@@ -429,9 +523,12 @@
     }
   }
   function updateTime() {
-    let t = game ? fmt(elapsed()) : '';
-    if (game && settings.mistakeLimit) t += ' \u00b7 Mistakes ' + game.mistakes + '/' + MAX_MISTAKES;
-    $('#lbl-time').textContent = t;
+    const parts = [];
+    if (game && settings.showTimer) parts.push(fmt(elapsed()));
+    if (game && settings.mistakeLimit && settings.showMistakes) parts.push('Mistakes ' + game.mistakes + '/' + MAX_MISTAKES);
+    const t = parts.join(' \u00b7 ');
+    const el = $('#lbl-time');
+    if (el.textContent !== t) el.textContent = t;
   }
   setInterval(updateTime, 500);
 
@@ -447,6 +544,55 @@
       return '<button class="diff-btn" data-new="' + d + '"><b>' + LABEL[d] + '</b><small>' + sub + '</small></button>';
     }).join('') + '</div>';
   }
+  function seg(key, options, extraStyle) {
+    return '<div class="seg full">' + options.map(([val, label, style]) =>
+      '<button data-set="' + key + '" data-val="' + val + '" class="' + (settings[key] === val ? 'on' : '') + '"' + (style ? ' style="' + style + '"' : '') + '>' + label + '</button>').join('') + '</div>';
+  }
+  function sw(key, label) {
+    return '<button class="row" data-toggle="' + key + '"><span>' + label + '</span><span class="switch' + (settings[key] ? ' on' : '') + '"></span></button>';
+  }
+  const THEMES = [
+    ['light', 'Light', 'background:#f6f6f4;--sw-surface:#fff;--sw-line:#3b4047', 'light'],
+    ['paper', 'Paper', 'background:#f3eee3;--sw-surface:#fbf8f1;--sw-line:#4a4238', 'light'],
+    ['dark', 'Dark', 'background:#111214;--sw-surface:#1c1d21;--sw-line:#767b84', 'dark'],
+    ['auto', 'Auto', '--sw-surface:#fff;--sw-line:#767b84', 'light'],
+  ];
+  function customiseHTML() {
+    const dark = Look.resolveTheme(settings.theme) === 'dark';
+    const acc = Look.ACCENTS[settings.accent] || Look.ACCENTS.blue;
+    const tick = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+    let h = '<h3>Colours</h3><div class="list"><div class="field"><span>Theme</span><div class="themes">'
+      + THEMES.map(([val, label, style, mode]) =>
+        '<button class="theme-btn' + (settings.theme === val ? ' on' : '') + '" data-set="theme" data-val="' + val + '">'
+        + '<span class="sw' + (val === 'auto' ? ' auto' : '') + '" style="' + style + '"><i style="--accent:' + acc[mode] + '"></i></span>' + label + '</button>').join('')
+      + '</div></div><div class="field"><span>Accent colour</span><div class="accents">'
+      + Object.keys(Look.ACCENTS).map((k) => {
+        const a = Look.ACCENTS[k];
+        return '<button class="dot' + (settings.accent === k ? ' on' : '') + '" data-set="accent" data-val="' + k + '" aria-label="' + a.name + '" style="background:' + (dark ? a.dark : a.light) + '">' + tick + '</button>';
+      }).join('')
+      + '</div></div></div>';
+    h += '<h3>Numbers &amp; grid</h3><div class="list">'
+      + '<div class="field"><span>Number size</span>' + seg('numSize', [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']]) + '</div>'
+      + '<div class="field"><span>Number style</span>' + seg('numFont', [
+        ['system', '<span class="sample" style="font-family:-apple-system,system-ui,sans-serif">123</span>'],
+        ['rounded', '<span class="sample" style="font-family:ui-rounded,\'SF Pro Rounded\',system-ui,sans-serif">123</span>'],
+        ['serif', '<span class="sample" style="font-family:ui-serif,\'New York\',Georgia,serif">123</span>'],
+        ['mono', '<span class="sample" style="font-family:ui-monospace,\'SF Mono\',Menlo,monospace">123</span>'],
+      ]) + '</div>'
+      + '<div class="field"><span>Box lines</span>' + seg('gridLines', [['light', 'Light'], ['standard', 'Standard'], ['bold', 'Bold']]) + '</div>'
+      + '</div>';
+    h += '<h3>On screen</h3><div class="list">'
+      + sw('showTimer', 'Timer')
+      + (settings.mistakeLimit ? sw('showMistakes', 'Mistake counter') : '')
+      + sw('showCounts', 'Numbers left on keypad')
+      + '</div>';
+    h += '<h3>Feel</h3><div class="list">'
+      + sw('animations', 'Animations')
+      + sw('sounds', 'Sounds')
+      + '</div><p class="note">Animations flash a row, column or box when you finish it, and ripple across the board when you solve the puzzle.</p>';
+    h += '<h3>&nbsp;</h3><div class="list"><button class="row reset-look" data-act="reset-look"><span>Reset to default look</span></button></div>';
+    return h;
+  }
   function openSheet(view, opts) {
     opts = opts || {};
     stopClock();
@@ -460,6 +606,7 @@
       }
       html += '<h3>More</h3><div class="list">'
         + '<button class="row" data-act="stats"><span>Statistics</span>' + chev + '</button>'
+        + '<button class="row" data-act="customise"><span>Customise</span>' + chev + '</button>'
         + '<button class="row" data-act="settings"><span>Settings</span>' + chev + '</button></div>';
     } else if (view === 'settings') {
       html += backBtn + '<h2>Settings</h2><div class="list">'
@@ -474,6 +621,8 @@
           ? 'Any wrong digit is marked in red and counts as a mistake. The third mistake ends the game.'
           : '<b>Rule breaks</b> marks a digit only when it clashes with another in its row, column or box. <b>Wrong digits</b> checks every entry against the solution.') + '</p>'
         + '<h3>About</h3><div class="list"><div class="row"><span>Version</span><span class="val">' + VERSION + '</span></div></div>';
+    } else if (view === 'customise') {
+      html += backBtn + '<h2>Customise</h2>' + customiseHTML();
     } else if (view === 'stats') {
       html += backBtn + '<h2>Statistics</h2><div class="list">';
       for (const d of DIFFS) {
@@ -492,8 +641,10 @@
         + '<div class="done-time">' + fmt(game.elapsed) + '</div>'
         + '<h3>Play again</h3>' + diffGrid();
     }
+    const keepScroll = opts.keepScroll ? panel.scrollTop : 0;
     panel.innerHTML = html;
     sheet.hidden = false;
+    panel.scrollTop = keepScroll;
     $('#toast').classList.remove('show');
   }
   function closeSheet(force) {
@@ -508,10 +659,26 @@
     if (!t) return;
     if (t.dataset.new) return newGame(t.dataset.new);
     if (t.dataset.mm) { settings.mistakeMode = t.dataset.mm; store(KEYS.settings, settings); openSheet('settings'); return; }
-    if (t.dataset.toggle) { const k = t.dataset.toggle; settings[k] = !settings[k]; store(KEYS.settings, settings); openSheet('settings'); render(); return; }
+    if (t.dataset.toggle) {
+      const k = t.dataset.toggle;
+      settings[k] = !settings[k];
+      saveSettings();
+      if (k === 'sounds' && settings.sounds) Sound.play('place');
+      openSheet(sheetView, { keepScroll: true }); render(); return;
+    }
+    if (t.dataset.set) {
+      settings[t.dataset.set] = t.dataset.val;
+      saveSettings();
+      openSheet(sheetView, { keepScroll: true }); render(); return;
+    }
     const act = t.dataset.act;
     if (act === 'retry') restart();
-    else if (act === 'menu' || act === 'stats' || act === 'settings') openSheet(act);
+    else if (act === 'menu' || act === 'stats' || act === 'settings' || act === 'customise') openSheet(act);
+    else if (act === 'reset-look') {
+      for (const k of Object.keys(Look.DEFAULTS)) settings[k] = Look.DEFAULTS[k];
+      saveSettings();
+      openSheet('customise', { keepScroll: true }); render();
+    }
     else if (act === 'restart') {
       if (restartArmed) restart();
       else { restartArmed = true; $('#restart-hint').textContent = 'Tap again to confirm'; }
