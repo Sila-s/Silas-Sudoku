@@ -1,5 +1,5 @@
 // Service worker: caches the whole app so it runs with no connection.
-const VERSION = '1.3.0'; // keep in sync with js/app.js
+const VERSION = '1.3.1'; // keep in sync with js/app.js
 const CACHE = 'sudoku-' + VERSION;
 const ASSETS = [
   './',

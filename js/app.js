@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0'; // keep in sync with sw.js
+  const VERSION = '1.3.1'; // keep in sync with sw.js
   const E = window.SudokuEngine;
   const $ = (s) => document.querySelector(s);
   const DIFFS = E.DIFFICULTIES;
@@ -380,12 +380,23 @@
     commit([{ i: selected, v: 0, n: 0 }]);
     Sound.play('erase');
   }
+  // Notes are "full" when every empty square has at least one note in it.
+  // Then the button clears them; otherwise it fills them in. Both can be undone.
+  const notesFull = () => game && game.values.some((v) => !v) && game.values.every((v, i) => v || game.notes[i]);
   function fillAllNotes() {
     if (!canPlay()) return;
     const ch = [];
-    for (let i = 0; i < 81; i++) if (!game.values[i]) ch.push({ i, v: 0, n: E.candidatesFor(game.values, i) });
-    commit(ch);
-    toast('Notes filled in');
+    if (notesFull()) {
+      for (let i = 0; i < 81; i++) if (game.notes[i]) ch.push({ i, v: game.values[i], n: 0 });
+      commit(ch);
+      Sound.play('erase');
+      toast('Notes cleared');
+    } else {
+      for (let i = 0; i < 81; i++) if (!game.values[i]) ch.push({ i, v: 0, n: E.candidatesFor(game.values, i) });
+      commit(ch);
+      Sound.play('note');
+      toast('Notes filled in');
+    }
   }
   function checkComplete() {
     if (game.values.includes(0)) { warnedFull = false; return; }
@@ -590,6 +601,9 @@
     $('#t-redo').disabled = !playable || !game.future.length;
     $('#t-erase').disabled = !playable;
     $('#t-auto').disabled = !playable;
+    const autoLabel = has && notesFull() ? 'Clear notes' : 'All notes';
+    const autoSpan = $('#t-auto span');
+    if (autoSpan.textContent !== autoLabel) { autoSpan.textContent = autoLabel; $('#t-auto').setAttribute('aria-label', autoLabel); }
     $('#t-hint').disabled = !playable;
     $('#t-notes').disabled = !playable;
     $('#t-notes').classList.toggle('on', notesMode);
